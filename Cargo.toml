@@ -1,0 +1,20 @@
+[package]
+name = "grove"
+version = "0.1.0"
+edition = "2021"
+description = "A clickable terminal git graph viewer, inspired by vscode-git-graph."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+gix = { version = "0.66", default-features = false, features = ["max-performance-safe", "revision", "blob-diff"] }
+anyhow = "1"
+imara-diff = "0.1"
+syntect = { version = "5", default-features = false, features = ["parsing", "default-themes", "regex-fancy", "dump-load", "yaml-load", "html"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

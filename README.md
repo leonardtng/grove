@@ -1,0 +1,112 @@
+# grove
+
+A terminal git graph viewer with mouse support, inline diffs, and the most common git operations baked in. Built for people who live in their terminal and don't want to leave it just to look at history.
+
+## What it looks like
+
+```
+[r] refresh  [f] fetch  [p] pull  [t] tag  [T] push tags     loaded 10000 commits
+┌─ grove — /Users/leonard/Desktop/www/datacurve/shipd ──────┐ ┌─ details ──────┐
+│ ●─╮  a3f9d2  main  origin/main  HEAD  Leonard  feat: add │ │ commit a3f9d2  │
+│ │ │  b127cd                            Alice    fix: rate│ │ Author: Leonard│
+│ │ ●─╮ c8a4be  origin/feature/auth     Bob      wip auth  │ │ Date:   2026-04│
+│ │ │ │ d5e6ff                           Carol   refactor  │ │                │
+│ ●─╯ │ e7f9aa                           Leonard merge dev │ │ feat: add foo  │
+│ │   │ f1b2c3                           Alice   docs: …   │ │                │
+│ │   ●─╯ a8d4c1  v0.1.0                 Bob     bump      │ │ Adds the foo   │
+│ │     │ ...                                              │ │ subsystem with │
+│ ●─────╯  ...                                             │ │ ...            │
+└──────────────────────────────────────────────────────────┘ └────────────────┘
+ j/k move   ↵ expand   b branch   c checkout   n rename   D del   t tag   q quit
+```
+
+When you click a file inside an expanded commit, the right pane switches to a unified inline diff with syntax highlighting:
+
+```
+┌─ [M] src/auth/handler.ts · TypeScript ──────────────────────────────────────┐
+│   42    42       export async function handleLogin(req: Request) {         │
+│   43    43         const body = await req.json();                          │
+│   44       -        const user = await db.user.find(body.email);           │
+│        44 +        const user = await db.user.findUnique({                 │
+│        45 +          where: { email: body.email },                         │
+│        46 +        });                                                     │
+│   45    47         if (!user) return new Response("not found", { status: 4 │
+│   46    48         ...                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+ j/k scroll   PgUp/PgDn page   esc close diff   q quit
+```
+
+Added rows are highlighted dark green, deleted rows dark red, both spanning the full panel width. Syntax colors are mapped to the 16 ANSI slots so they pick up your terminal theme.
+
+## Features
+
+- **Lane-tracking graph** with proper box-drawing connectors (`╯`, `╰`, `╮`, `╭`, `┼`) and per-lane colors
+- **All refs visible**, including remotes — colleagues' branches show up as red chips
+- **Branch / tag / HEAD chips** next to each commit
+- **Click anywhere**: click a commit to expand its file list, click a file to open the diff
+- **Inline whole-file diff viewer** — see the entire file with `+`/`-` lines interleaved (like an IDE), not just unified hunks
+- **Syntax highlighting for 213 languages** via [`two-face`](https://crates.io/crates/two-face) (the syntax pack `bat` uses)
+- **Theme-adaptive**: highlight colors map to ANSI named slots so your terminal palette decides the actual paint
+- **Mouse wheel scrolling** independent of selection — keep your highlight pinned while scrolling through history
+- **Free scroll** of the commit list and the diff panel separately
+- **In-tool git ops**: refresh, fetch, pull, tag, push tags, branch create / checkout / rename / delete
+- **Lightweight**: a single static binary, ~10MB. Uses [`gix`](https://github.com/Byron/gitoxide) so there's no `libgit2` C dependency.
+
+## Install
+
+```
+cargo install --path .
+```
+
+Or build and run directly:
+
+```
+cargo run --release -- /path/to/your/repo
+```
+
+## Usage
+
+```
+grove [PATH] [--limit N | -n N]
+```
+
+- `PATH` — repo to view. Defaults to `.`. `gix` will walk upward to find `.git`.
+- `--limit N` / `-n N` — max commits to load. Default is 10,000.
+
+## Keyboard
+
+| Key | Action |
+|---|---|
+| `j` / `k` / arrows | Move selection one commit |
+| `PgUp` / `PgDn` | Scroll 20 |
+| `Home` / `End` | Jump to first/last commit |
+| `Enter` / `Space` | Expand the selected commit (load files) |
+| Mouse wheel | Scroll viewport (selection stays put) |
+| Click commit | Select + expand |
+| Click file | Open inline diff in the right pane |
+| `r` | Refresh from disk |
+| `f` | `git fetch --all --prune` |
+| `p` | `git pull --ff-only` |
+| `t` | Create tag at selected commit (prompts for name) |
+| `T` | `git push origin --tags` |
+| `b` | Create branch at selected commit (prompts) |
+| `c` | Checkout (branch on selected commit, or detached on commit) |
+| `n` | Rename current HEAD branch (prompts) |
+| `D` | Delete first local branch on selected commit (force) |
+| `Esc` | Close the diff view (or cancel the input prompt) |
+| `q` | Quit |
+
+In the diff view, `j`/`k`/`PgUp`/`PgDn`/`Home`/`End` and the mouse wheel scroll the diff itself. `Esc` returns to the commit list.
+
+## Stack
+
+- **[Rust](https://rust-lang.org)** — single static binary
+- **[Ratatui](https://ratatui.rs)** — TUI rendering
+- **[crossterm](https://crates.io/crates/crossterm)** — terminal backend with mouse support (SGR 1006)
+- **[gix (gitoxide)](https://github.com/Byron/gitoxide)** — pure-Rust git access, no libgit2
+- **[imara-diff](https://crates.io/crates/imara-diff)** — line diff (histogram algorithm)
+- **[syntect](https://crates.io/crates/syntect)** + **[two-face](https://crates.io/crates/two-face)** — syntax highlighting
+
+## Status
+
+Early. Works on the repos I've thrown at it. Things I might add next: branch picker overlay (when multiple branches share a commit), background fetch with progress, annotated tag support, push current branch.
