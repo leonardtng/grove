@@ -5,6 +5,17 @@ edition = "2021"
 description = "A clickable terminal git graph viewer, inspired by vscode-git-graph."
 license = "MIT OR Apache-2.0"
 
+# Build the same code as both `grove` (standalone) and `git-grove` (so it
+# becomes available as `git grove`, since git dispatches subcommands to any
+# binary named `git-foo` on your PATH).
+[[bin]]
+name = "grove"
+path = "src/main.rs"
+
+[[bin]]
+name = "git-grove"
+path = "src/main.rs"
+
 [dependencies]
 ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }

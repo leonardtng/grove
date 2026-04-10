@@ -79,14 +79,18 @@ cargo install --path . --locked
 
 ## Usage
 
-Just run `grove` from anywhere inside any git repo:
+Run from anywhere inside any git repo. Two equivalent forms:
 
 ```
 cd ~/code/my-project
 grove
+# or, as a git subcommand:
+git grove
 ```
 
-It walks upward from `.` to find the closest `.git`, so you can be in any subdirectory. Equivalent to:
+`grove` and `git grove` are the same binary. The git-subcommand form works because cargo also installs a `git-grove` binary, which `git` auto-dispatches when you type `git grove`.
+
+It walks upward from `.` to find the closest `.git`, so you can be in any subdirectory. Full form:
 
 ```
 grove [PATH] [--limit N | -n N]
