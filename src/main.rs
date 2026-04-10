@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::{collections::HashMap, io, path::PathBuf};
@@ -55,6 +55,7 @@ struct App {
     toolbar_buttons: Vec<(u16, u16, ToolbarAction)>, // (start_x, end_x, action)
     pending: Option<PendingAction>,
     input: Option<InputState>,
+    picker: Option<Picker>,
     should_quit: bool,
 }
 
@@ -94,6 +95,19 @@ enum InputKind {
     RenameBranch { old: String },
 }
 
+struct Picker {
+    title: String,
+    items: Vec<String>,
+    selected: usize,
+    kind: PickerKind,
+}
+
+#[derive(Clone, Copy)]
+enum PickerKind {
+    Checkout,
+    Delete,
+}
+
 impl App {
     fn new(repo_path: PathBuf, limit: usize) -> Result<Self> {
         let loaded = git::load_repo(&repo_path, limit)?;
@@ -116,6 +130,7 @@ impl App {
             toolbar_buttons: Vec::new(),
             pending: None,
             input: None,
+            picker: None,
             should_quit: false,
         })
     }
@@ -203,13 +218,14 @@ impl App {
         self.run_git(&["push", "origin", "--tags"], "push tags");
     }
 
-    fn first_local_branch_at(&self, commit_idx: usize) -> Option<String> {
-        let id = self.loaded.commits.get(commit_idx)?.id;
-        let labels = self.loaded.refs_by_id.get(&id)?;
+    fn local_branches_at(&self, commit_idx: usize) -> Vec<String> {
+        let Some(commit) = self.loaded.commits.get(commit_idx) else { return Vec::new() };
+        let Some(labels) = self.loaded.refs_by_id.get(&commit.id) else { return Vec::new() };
         labels
             .iter()
-            .find(|l| matches!(l.kind, RefKind::LocalBranch))
+            .filter(|l| matches!(l.kind, RefKind::LocalBranch))
             .map(|l| l.name.clone())
+            .collect()
     }
 
     fn start_branch_input(&mut self) {
@@ -230,14 +246,29 @@ impl App {
             self.status = "no commit selected".to_string();
             return;
         };
-        if let Some(name) = self.first_local_branch_at(idx) {
-            self.status = format!("checking out branch '{name}'...");
-            self.pending = Some(PendingAction::CheckoutBranch { name });
-        } else if let Some(commit) = self.loaded.commits.get(idx) {
-            let sha = commit.id_hex.clone();
-            let short = &sha[..7];
-            self.status = format!("checking out commit {short} (detached)...");
-            self.pending = Some(PendingAction::CheckoutCommit { sha });
+        let branches = self.local_branches_at(idx);
+        match branches.len() {
+            0 => {
+                // No local branch — detach.
+                let Some(commit) = self.loaded.commits.get(idx) else { return };
+                let sha = commit.id_hex.clone();
+                let short = sha[..7].to_string();
+                self.status = format!("checking out commit {short} (detached)...");
+                self.pending = Some(PendingAction::CheckoutCommit { sha });
+            }
+            1 => {
+                let name = branches.into_iter().next().unwrap();
+                self.status = format!("checking out branch '{name}'...");
+                self.pending = Some(PendingAction::CheckoutBranch { name });
+            }
+            _ => {
+                self.picker = Some(Picker {
+                    title: "checkout which branch?".to_string(),
+                    items: branches,
+                    selected: 0,
+                    kind: PickerKind::Checkout,
+                });
+            }
         }
     }
 
@@ -246,13 +277,53 @@ impl App {
             self.status = "no commit selected".to_string();
             return;
         };
-        match self.first_local_branch_at(idx) {
-            Some(name) => {
+        let branches = self.local_branches_at(idx);
+        match branches.len() {
+            0 => {
+                self.status = "no local branch on this commit".to_string();
+            }
+            1 => {
+                let name = branches.into_iter().next().unwrap();
                 self.status = format!("deleting branch '{name}'...");
                 self.pending = Some(PendingAction::DeleteBranch { name });
             }
-            None => {
-                self.status = "no local branch on this commit".to_string();
+            _ => {
+                self.picker = Some(Picker {
+                    title: "delete which branch?".to_string(),
+                    items: branches,
+                    selected: 0,
+                    kind: PickerKind::Delete,
+                });
+            }
+        }
+    }
+
+    fn picker_move(&mut self, delta: i32) {
+        if let Some(p) = &mut self.picker {
+            let len = p.items.len() as i32;
+            if len == 0 {
+                return;
+            }
+            let next = (p.selected as i32 + delta).rem_euclid(len);
+            p.selected = next as usize;
+        }
+    }
+
+    fn picker_cancel(&mut self) {
+        self.picker = None;
+    }
+
+    fn picker_submit(&mut self) {
+        let Some(p) = self.picker.take() else { return };
+        let Some(name) = p.items.get(p.selected).cloned() else { return };
+        match p.kind {
+            PickerKind::Checkout => {
+                self.status = format!("checking out branch '{name}'...");
+                self.pending = Some(PendingAction::CheckoutBranch { name });
+            }
+            PickerKind::Delete => {
+                self.status = format!("deleting branch '{name}'...");
+                self.pending = Some(PendingAction::DeleteBranch { name });
             }
         }
     }
@@ -615,6 +686,17 @@ fn run_app<B: ratatui::backend::Backend>(
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                // Picker mode swallows everything except nav/Esc/Enter.
+                if app.picker.is_some() {
+                    match key.code {
+                        KeyCode::Esc => app.picker_cancel(),
+                        KeyCode::Enter => app.picker_submit(),
+                        KeyCode::Down | KeyCode::Char('j') => app.picker_move(1),
+                        KeyCode::Up | KeyCode::Char('k') => app.picker_move(-1),
+                        _ => {}
+                    }
+                    continue;
+                }
                 // Input mode swallows everything except Esc/Enter/typing.
                 if app.input.is_some() {
                     match key.code {
@@ -849,7 +931,58 @@ fn draw(f: &mut Frame, app: &mut App) -> (u16, Rect, Rect) {
 
     render_bottom_row(f, chunks[2], app, BottomMode::Normal);
 
+    if app.picker.is_some() {
+        render_picker_overlay(f, f.area(), app);
+    }
+
     (toolbar_area.y, list_area, right_area)
+}
+
+fn render_picker_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = &app.picker else { return };
+
+    // Center a small popup.
+    let max_w = picker
+        .items
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(20)
+        .max(picker.title.chars().count())
+        + 6;
+    let popup_w = (max_w as u16).min(area.width.saturating_sub(4)).max(20);
+    let popup_h = (picker.items.len() as u16 + 2).min(area.height.saturating_sub(4)).max(3);
+
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: popup_w,
+        height: popup_h,
+    };
+
+    f.render_widget(Clear, popup);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, name) in picker.items.iter().enumerate() {
+        let style = if i == picker.selected {
+            Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        let prefix = if i == picker.selected { "▶ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), style),
+            Span::styled(name.clone(), style),
+        ]));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", picker.title));
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, popup);
 }
 
 #[derive(Clone, Copy)]
