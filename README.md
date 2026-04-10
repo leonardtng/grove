@@ -56,23 +56,43 @@ Added rows are highlighted dark green, deleted rows dark red, both spanning the 
 
 ## Install
 
-```
-cargo install --path .
-```
-
-Or build and run directly:
+You need a Rust toolchain. If you don't have one:
 
 ```
-cargo run --release -- /path/to/your/repo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+```
+
+Then install grove from the repo (puts a `grove` binary at `~/.cargo/bin/grove`, which rustup adds to your `PATH`):
+
+```
+cargo install --git https://github.com/leonardtng/grove --locked
+```
+
+To upgrade later, run the same command again.
+
+If you've cloned the repo locally, you can also do:
+
+```
+cargo install --path . --locked
 ```
 
 ## Usage
+
+Just run `grove` from anywhere inside any git repo:
+
+```
+cd ~/code/my-project
+grove
+```
+
+It walks upward from `.` to find the closest `.git`, so you can be in any subdirectory. Equivalent to:
 
 ```
 grove [PATH] [--limit N | -n N]
 ```
 
-- `PATH` — repo to view. Defaults to `.`. `gix` will walk upward to find `.git`.
+- `PATH` — repo to view. Defaults to `.`. `gix` walks upward to find `.git`.
 - `--limit N` / `-n N` — max commits to load. Default is 10,000.
 
 ## Keyboard
