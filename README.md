@@ -63,7 +63,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 ```
 
-Then install grove from the repo (puts a `grove` binary at `~/.cargo/bin/grove`, which rustup adds to your `PATH`):
+Then install grove from the repo (puts both `grove` and `git-grove` binaries at `~/.cargo/bin/`, which rustup adds to your `PATH`):
 
 ```
 cargo install --git https://github.com/leonardtng/grove --locked
