@@ -4,35 +4,37 @@ A terminal git graph viewer with mouse support, inline diffs, and the most commo
 
 ## What it looks like
 
+The commit graph with branch / tag chips:
+
 ```
-[r] refresh  [f] fetch  [p] pull  [t] tag  [T] push tags     loaded 10000 commits
-┌─ grove — /Users/leonard/Desktop/www/datacurve/shipd ──────┐ ┌─ details ──────┐
-│ ●─╮  a3f9d2  main  origin/main  HEAD  Leonard  feat: add │ │ commit a3f9d2  │
-│ │ │  b127cd                            Alice    fix: rate│ │ Author: Leonard│
-│ │ ●─╮ c8a4be  origin/feature/auth     Bob      wip auth  │ │ Date:   2026-04│
-│ │ │ │ d5e6ff                           Carol   refactor  │ │                │
-│ ●─╯ │ e7f9aa                           Leonard merge dev │ │ feat: add foo  │
-│ │   │ f1b2c3                           Alice   docs: …   │ │                │
-│ │   ●─╯ a8d4c1  v0.1.0                 Bob     bump      │ │ Adds the foo   │
-│ │     │ ...                                              │ │ subsystem with │
-│ ●─────╯  ...                                             │ │ ...            │
-└──────────────────────────────────────────────────────────┘ └────────────────┘
+[r] refresh  [f] fetch  [p] pull  [t] tag  [T] push tags         loaded 10000 commits
+┌─ grove · ~/code/myrepo ──────────────────────────────────────────────────────────────┐
+│ ●─╮  a3f9d2  main  origin/main  HEAD  Leonard  feat: add login flow                  │
+│ │ │  b127cd                             Alice    fix: rate limit edge case           │
+│ │ ●─╮ c8a4be  feature/auth              Bob      wip: oauth handler                  │
+│ │ │ │ d5e6ff                            Carol    refactor: split util                │
+│ ●─╯ │ e7f9aa                            Leonard  merge dev → main                    │
+│ │   │ f1b2c3  v0.2.0                    Alice    docs: update README                 │
+│ │   ●─╯ a8d4c1                          Bob      bump version                        │
+│ ●─────╯ b9c2d1                          Leonard  init repo                           │
+└──────────────────────────────────────────────────────────────────────────────────────┘
  j/k move   ↵ expand   b branch   c checkout   n rename   D del   t tag   q quit
 ```
 
-When you click a file inside an expanded commit, the right pane switches to a unified inline diff with syntax highlighting:
+Click a file inside an expanded commit to open a syntax-highlighted inline diff. The whole row is tinted (green for additions, red for deletions); context lines stay neutral so the diff jumps out:
 
 ```
-┌─ [M] src/auth/handler.ts · TypeScript ──────────────────────────────────────┐
-│   42    42       export async function handleLogin(req: Request) {         │
-│   43    43         const body = await req.json();                          │
-│   44       -        const user = await db.user.find(body.email);           │
-│        44 +        const user = await db.user.findUnique({                 │
-│        45 +          where: { email: body.email },                         │
-│        46 +        });                                                     │
-│   45    47         if (!user) return new Response("not found", { status: 4 │
-│   46    48         ...                                                     │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌─ [M] src/auth/handler.ts · TypeScript ───────────────────────────────────────────────┐
+│   42    42       export async function handleLogin(req: Request) {                   │
+│   43    43         const body = await req.json();                                    │
+│   44       -      const user = await db.user.find(body.email);                       │
+│         44 +      const user = await db.user.findUnique({                            │
+│         45 +        where: { email: body.email },                                    │
+│         46 +      });                                                                │
+│   45    47         if (!user) return new Response('not found', { status: 404 });     │
+│   46    48         return Response.json({ user });                                   │
+│   47    49       }                                                                   │
+└──────────────────────────────────────────────────────────────────────────────────────┘
  j/k scroll   PgUp/PgDn page   esc close diff   q quit
 ```
 
