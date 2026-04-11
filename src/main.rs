@@ -56,6 +56,7 @@ struct App {
     pending: Option<PendingAction>,
     input: Option<InputState>,
     picker: Option<Picker>,
+    dirty: bool,
     should_quit: bool,
 }
 
@@ -115,7 +116,7 @@ impl App {
         let expanded = vec![false; loaded.commits.len()];
         let selected = if loaded.commits.is_empty() { None } else { Some(0) };
         let status = format!("loaded {} commits", loaded.commits.len());
-        Ok(Self {
+        let mut app = Self {
             repo_path,
             limit,
             loaded,
@@ -131,8 +132,29 @@ impl App {
             pending: None,
             input: None,
             picker: None,
+            dirty: false,
             should_quit: false,
-        })
+        };
+        app.detect_dirty();
+        Ok(app)
+    }
+
+    fn detect_dirty(&mut self) {
+        let work_dir = self
+            .loaded
+            .repo
+            .work_dir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.repo_path.clone());
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&work_dir)
+            .output();
+        self.dirty = matches!(out, Ok(o) if o.status.success() && !o.stdout.is_empty());
+    }
+
+    fn virtual_offset(&self) -> usize {
+        if self.dirty { 1 } else { 0 }
     }
 
     fn queue_refresh(&mut self) {
@@ -392,6 +414,7 @@ impl App {
                 self.status = format!("refreshed: {} commits", loaded.commits.len());
                 self.loaded = loaded;
                 self.clamp_scroll();
+                self.detect_dirty();
             }
             Err(e) => {
                 self.status = format!("refresh failed: {e}");
@@ -456,12 +479,12 @@ impl App {
 
     /// Total height in lines if all items are stacked.
     fn total_lines(&self) -> usize {
-        (0..self.loaded.commits.len()).map(|i| self.item_height(i)).sum()
+        self.virtual_offset() + (0..self.loaded.commits.len()).map(|i| self.item_height(i)).sum::<usize>()
     }
 
     /// First visible line index of the commit at `idx`, given current expansion state.
     fn line_offset_of(&self, idx: usize) -> usize {
-        (0..idx).map(|i| self.item_height(i)).sum()
+        self.virtual_offset() + (0..idx).map(|i| self.item_height(i)).sum::<usize>()
     }
 
     fn ensure_selection_visible(&mut self) {
@@ -582,8 +605,14 @@ impl App {
         }
         let row_in_view = (ev.row - inner_top) as usize;
 
-        // Map (row_in_view + scroll) → which commit + sub-row.
+        // Map (row_in_view + scroll) → which commit + sub-row. The virtual
+        // "uncommitted changes" row sits at line 0 when dirty; clicks on it
+        // are no-ops for now.
         let target_line = self.list_scroll as usize + row_in_view;
+        if target_line < self.virtual_offset() {
+            return;
+        }
+        let target_line = target_line - self.virtual_offset();
         let mut acc = 0usize;
         for idx in 0..self.loaded.commits.len() {
             let h = self.item_height(idx);
@@ -858,6 +887,33 @@ fn draw(f: &mut Frame, app: &mut App) -> (u16, Rect, Rect) {
     // highlight to lines that belong to the currently selected commit.
     let highlight_bg = Color::DarkGray;
     let mut all_lines: Vec<Line> = Vec::new();
+
+    // Virtual "uncommitted changes" row at the very top, when dirty.
+    if app.dirty {
+        // Find HEAD's lane in the graph so the marker sits on the right column.
+        let head_lane = app
+            .loaded
+            .head_id
+            .and_then(|h| app.loaded.commits.iter().position(|c| c.id == h))
+            .map(|idx| app.graph_rows[idx].commit_lane)
+            .unwrap_or(0);
+        let mut spans: Vec<Span> = Vec::new();
+        // Pad lanes 0..head_lane with blanks so the dot lands on the right column.
+        for _ in 0..head_lane {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            "○ ",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            "uncommitted changes",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::DIM | Modifier::ITALIC),
+        ));
+        all_lines.push(Line::from(spans));
+    }
+
     for (idx, c) in app.loaded.commits.iter().enumerate() {
         let row = &app.graph_rows[idx];
         let refs = app.loaded.refs_by_id.get(&c.id);
