@@ -57,6 +57,8 @@ struct App {
     input: Option<InputState>,
     picker: Option<Picker>,
     dirty: bool,
+    uncommitted_expanded: bool,
+    uncommitted_files: Option<Vec<FileChange>>,
     should_quit: bool,
 }
 
@@ -133,6 +135,8 @@ impl App {
             input: None,
             picker: None,
             dirty: false,
+            uncommitted_expanded: false,
+            uncommitted_files: None,
             should_quit: false,
         };
         app.detect_dirty();
@@ -151,10 +155,100 @@ impl App {
             .current_dir(&work_dir)
             .output();
         self.dirty = matches!(out, Ok(o) if o.status.success() && !o.stdout.is_empty());
+        // Invalidate the cached file list — must reload on next expand.
+        self.uncommitted_files = None;
+        if !self.dirty {
+            self.uncommitted_expanded = false;
+        }
+    }
+
+    fn load_uncommitted_files(&mut self) {
+        let work_dir = self
+            .loaded
+            .repo
+            .work_dir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.repo_path.clone());
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&work_dir)
+            .output();
+        let mut files: Vec<FileChange> = Vec::new();
+        if let Ok(o) = out {
+            if o.status.success() {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                for line in stdout.lines() {
+                    if line.len() < 3 {
+                        continue;
+                    }
+                    let staged = line.chars().next().unwrap_or(' ');
+                    let unstaged = line.chars().nth(1).unwrap_or(' ');
+                    // For renames/copies the line format is "R  old -> new".
+                    let path_part = &line[3..];
+                    let path = if let Some(idx) = path_part.find(" -> ") {
+                        path_part[idx + 4..].to_string()
+                    } else {
+                        path_part.to_string()
+                    };
+                    let status = if staged == 'D' || unstaged == 'D' {
+                        ChangeStatus::Deleted
+                    } else if staged == 'A' || (staged == '?' && unstaged == '?') {
+                        ChangeStatus::Added
+                    } else if staged == 'R' {
+                        ChangeStatus::Renamed
+                    } else {
+                        ChangeStatus::Modified
+                    };
+                    files.push(FileChange { status, path });
+                }
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        self.uncommitted_files = Some(files);
+    }
+
+    fn toggle_uncommitted_expand(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        self.uncommitted_expanded = !self.uncommitted_expanded;
+        if self.uncommitted_expanded && self.uncommitted_files.is_none() {
+            self.load_uncommitted_files();
+        }
+        self.clamp_scroll();
+    }
+
+    fn open_uncommitted_file(&mut self, file_idx: usize) {
+        let Some(files) = &self.uncommitted_files else { return };
+        let Some(fc) = files.get(file_idx).cloned() else { return };
+        let work_dir = self
+            .loaded
+            .repo
+            .work_dir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.repo_path.clone());
+        match FileDiff::compute_uncommitted(&self.loaded.repo, &work_dir, &fc.path, fc.status) {
+            Ok(view) => self.diff_view = Some(view),
+            Err(e) => self.status = format!("diff failed: {e}"),
+        }
+    }
+
+    /// Number of lines the virtual "uncommitted" block occupies (commit row +
+    /// expanded files).
+    fn virtual_height(&self) -> usize {
+        if !self.dirty {
+            return 0;
+        }
+        if self.uncommitted_expanded {
+            let n = self.uncommitted_files.as_ref().map(|v| v.len()).unwrap_or(0);
+            1 + n
+        } else {
+            1
+        }
     }
 
     fn virtual_offset(&self) -> usize {
-        if self.dirty { 1 } else { 0 }
+        self.virtual_height()
     }
 
     fn queue_refresh(&mut self) {
@@ -606,13 +700,20 @@ impl App {
         let row_in_view = (ev.row - inner_top) as usize;
 
         // Map (row_in_view + scroll) → which commit + sub-row. The virtual
-        // "uncommitted changes" row sits at line 0 when dirty; clicks on it
-        // are no-ops for now.
+        // "uncommitted changes" block (if dirty) lives at lines 0..virtual_height.
         let target_line = self.list_scroll as usize + row_in_view;
-        if target_line < self.virtual_offset() {
+        let vh = self.virtual_offset();
+        if target_line < vh {
+            // Inside the virtual block.
+            if target_line == 0 {
+                self.toggle_uncommitted_expand();
+            } else {
+                let file_idx = target_line - 1;
+                self.open_uncommitted_file(file_idx);
+            }
             return;
         }
-        let target_line = target_line - self.virtual_offset();
+        let target_line = target_line - vh;
         let mut acc = 0usize;
         for idx in 0..self.loaded.commits.len() {
             let h = self.item_height(idx);
@@ -888,7 +989,7 @@ fn draw(f: &mut Frame, app: &mut App) -> (u16, Rect, Rect) {
     let highlight_bg = Color::DarkGray;
     let mut all_lines: Vec<Line> = Vec::new();
 
-    // Virtual "uncommitted changes" row at the very top, when dirty.
+    // Virtual "uncommitted changes" block at the very top, when dirty.
     if app.dirty {
         // Find HEAD's lane in the graph so the marker sits on the right column.
         let head_lane = app
@@ -897,21 +998,60 @@ fn draw(f: &mut Frame, app: &mut App) -> (u16, Rect, Rect) {
             .and_then(|h| app.loaded.commits.iter().position(|c| c.id == h))
             .map(|idx| app.graph_rows[idx].commit_lane)
             .unwrap_or(0);
+
+        let lane_pad = |spans: &mut Vec<Span>| {
+            for _ in 0..head_lane {
+                spans.push(Span::raw("  "));
+            }
+        };
+
+        // Header row.
         let mut spans: Vec<Span> = Vec::new();
-        // Pad lanes 0..head_lane with blanks so the dot lands on the right column.
-        for _ in 0..head_lane {
-            spans.push(Span::raw("  "));
-        }
+        lane_pad(&mut spans);
         spans.push(Span::styled(
             "○ ",
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" "));
+        let label = if app.uncommitted_expanded {
+            "uncommitted changes ▾"
+        } else {
+            "uncommitted changes ▸"
+        };
         spans.push(Span::styled(
-            "uncommitted changes",
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::DIM | Modifier::ITALIC),
+            label.to_string(),
+            Style::new()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM | Modifier::ITALIC),
         ));
         all_lines.push(Line::from(spans));
+
+        // Expanded file rows.
+        if app.uncommitted_expanded {
+            if let Some(files) = &app.uncommitted_files {
+                for fc in files {
+                    let mut spans: Vec<Span> = Vec::new();
+                    lane_pad(&mut spans);
+                    spans.push(Span::styled(
+                        "│ ",
+                        Style::new().fg(Color::Yellow),
+                    ));
+                    let (letter, color) = match fc.status {
+                        ChangeStatus::Added => ('A', Color::Green),
+                        ChangeStatus::Deleted => ('D', Color::Red),
+                        ChangeStatus::Modified => ('M', Color::Yellow),
+                        ChangeStatus::Renamed => ('R', Color::Magenta),
+                    };
+                    spans.push(Span::raw("   "));
+                    spans.push(Span::styled(
+                        format!("{letter} "),
+                        Style::new().fg(color),
+                    ));
+                    spans.push(Span::raw(fc.path.clone()));
+                    all_lines.push(Line::from(spans));
+                }
+            }
+        }
     }
 
     for (idx, c) in app.loaded.commits.iter().enumerate() {

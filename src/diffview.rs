@@ -93,6 +93,50 @@ impl FileDiff {
         let next = (self.scroll as i32 + delta).clamp(0, max);
         self.scroll = next as u16;
     }
+
+    /// Diff HEAD's version of `path` against the on-disk file in the
+    /// working tree. Used for the "uncommitted changes" virtual row.
+    pub fn compute_uncommitted(
+        repo: &gix::Repository,
+        work_dir: &std::path::Path,
+        path: &str,
+        status: ChangeStatus,
+    ) -> Result<Self> {
+        // Old bytes: HEAD's blob at this path (empty for an addition).
+        let old_bytes = match repo.head()?.try_into_peeled_id()? {
+            Some(id) => {
+                let head_commit = repo.find_commit(id.detach())?;
+                let head_tree = head_commit.tree()?;
+                blob_at_path(repo, &head_tree, path).unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        // New bytes: read the file from disk. For deletions this fails and
+        // we fall back to empty.
+        let new_bytes = std::fs::read(work_dir.join(path)).unwrap_or_default();
+
+        let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
+        let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
+
+        let lines = build_inline(&old_text, &new_text);
+        let new_hl = syntax::highlight(&new_text, path);
+        let old_hl = syntax::highlight(&old_text, path);
+        let language = if !new_hl.language.is_empty() {
+            new_hl.language.clone()
+        } else {
+            old_hl.language.clone()
+        };
+
+        Ok(Self {
+            path: path.to_string(),
+            status,
+            lines,
+            scroll: 0,
+            hl_new: new_hl.lines,
+            hl_old: old_hl.lines,
+            language,
+        })
+    }
 }
 
 fn build_inline(old_text: &str, new_text: &str) -> Vec<DiffLine> {
