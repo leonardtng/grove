@@ -59,6 +59,9 @@ struct App {
     dirty: bool,
     uncommitted_expanded: bool,
     uncommitted_files: Option<Vec<FileChange>>,
+    /// Position of the "changes only / full file" toggle in the diff panel
+    /// title, captured each frame for click dispatch. (row, x_start, x_end).
+    diff_toggle_button: Option<(u16, u16, u16)>,
     should_quit: bool,
 }
 
@@ -137,6 +140,7 @@ impl App {
             dirty: false,
             uncommitted_expanded: false,
             uncommitted_files: None,
+            diff_toggle_button: None,
             should_quit: false,
         };
         app.detect_dirty();
@@ -665,6 +669,18 @@ impl App {
             }
         }
 
+        // Diff panel's "changes only / full file" toggle (in the top border).
+        if matches!(ev.kind, MouseEventKind::Down(_)) {
+            if let Some((row, x_start, x_end)) = self.diff_toggle_button {
+                if ev.row == row && ev.column >= x_start && ev.column < x_end {
+                    if let Some(v) = &mut self.diff_view {
+                        v.toggle_only_changes();
+                    }
+                    return;
+                }
+            }
+        }
+
         let in_list = point_in(ev.column, ev.row, list_area);
         let in_right = point_in(ev.column, ev.row, right_area);
 
@@ -839,78 +855,73 @@ fn run_app<B: ratatui::backend::Backend>(
                     continue;
                 }
                 let in_diff = app.diff_view.is_some();
+                // Keys common to both modes.
                 match key.code {
-                    KeyCode::Char('q') => app.should_quit = true,
+                    KeyCode::Char('q') => {
+                        app.should_quit = true;
+                        continue;
+                    }
                     KeyCode::Esc => {
                         if in_diff {
                             app.close_diff_view();
                         } else {
                             app.should_quit = true;
                         }
+                        continue;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if in_diff {
-                            app.scroll_diff(1);
-                        } else {
-                            app.move_selection(1);
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if in_diff {
-                            app.scroll_diff(-1);
-                        } else {
-                            app.move_selection(-1);
-                        }
-                    }
-                    KeyCode::PageDown => {
-                        if in_diff {
-                            app.scroll_diff(20);
-                        } else {
-                            app.move_selection(20);
-                        }
-                    }
-                    KeyCode::PageUp => {
-                        if in_diff {
-                            app.scroll_diff(-20);
-                        } else {
-                            app.move_selection(-20);
-                        }
-                    }
-                    KeyCode::Home => {
-                        if in_diff {
+                    _ => {}
+                }
+                if in_diff {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => app.scroll_diff(1),
+                        KeyCode::Up | KeyCode::Char('k') => app.scroll_diff(-1),
+                        KeyCode::PageDown => app.scroll_diff(20),
+                        KeyCode::PageUp => app.scroll_diff(-20),
+                        KeyCode::Home => {
                             if let Some(v) = &mut app.diff_view {
                                 v.scroll = 0;
                             }
-                        } else {
-                            app.selected = Some(0);
-                            app.list_scroll = 0;
                         }
-                    }
-                    KeyCode::End => {
-                        if in_diff {
+                        KeyCode::End => {
                             if let Some(v) = &mut app.diff_view {
                                 v.scroll = v.lines.len().saturating_sub(1) as u16;
                             }
-                        } else if !app.loaded.commits.is_empty() {
-                            app.selected = Some(app.loaded.commits.len() - 1);
-                            app.ensure_selection_visible();
                         }
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        if !in_diff {
-                            app.toggle_expand();
+                        KeyCode::Char('c') => {
+                            if let Some(v) = &mut app.diff_view {
+                                v.toggle_only_changes();
+                            }
                         }
+                        _ => {}
                     }
-                    KeyCode::Char('r') => app.queue_refresh(),
-                    KeyCode::Char('f') => app.queue_fetch(),
-                    KeyCode::Char('p') => app.queue_pull(),
-                    KeyCode::Char('t') => app.start_tag_input(),
-                    KeyCode::Char('T') => app.queue_push_tags(),
-                    KeyCode::Char('b') => app.start_branch_input(),
-                    KeyCode::Char('c') => app.checkout_selected(),
-                    KeyCode::Char('D') => app.delete_branch_at_selected(),
-                    KeyCode::Char('n') => app.start_rename_input(),
-                    _ => {}
+                } else {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+                        KeyCode::PageDown => app.move_selection(20),
+                        KeyCode::PageUp => app.move_selection(-20),
+                        KeyCode::Home => {
+                            app.selected = Some(0);
+                            app.list_scroll = 0;
+                        }
+                        KeyCode::End => {
+                            if !app.loaded.commits.is_empty() {
+                                app.selected = Some(app.loaded.commits.len() - 1);
+                                app.ensure_selection_visible();
+                            }
+                        }
+                        KeyCode::Enter | KeyCode::Char(' ') => app.toggle_expand(),
+                        KeyCode::Char('r') => app.queue_refresh(),
+                        KeyCode::Char('f') => app.queue_fetch(),
+                        KeyCode::Char('p') => app.queue_pull(),
+                        KeyCode::Char('t') => app.start_tag_input(),
+                        KeyCode::Char('T') => app.queue_push_tags(),
+                        KeyCode::Char('b') => app.start_branch_input(),
+                        KeyCode::Char('c') => app.checkout_selected(),
+                        KeyCode::Char('D') => app.delete_branch_at_selected(),
+                        KeyCode::Char('n') => app.start_rename_input(),
+                        _ => {}
+                    }
                 }
             }
             Event::Mouse(m) => {
@@ -1082,10 +1093,15 @@ fn draw(f: &mut Frame, app: &mut App) -> (u16, Rect, Rect) {
         .scroll((app.list_scroll, 0));
     f.render_widget(list_para, list_area);
 
-    if let Some(view) = &app.diff_view {
-        render_diff_panel(f, right_area, view);
+    if app.diff_view.is_some() {
+        render_diff_panel(f, right_area, app);
         render_bottom_row(f, chunks[2], app, BottomMode::Diff);
+        if app.picker.is_some() {
+            render_picker_overlay(f, f.area(), app);
+        }
         return (toolbar_area.y, list_area, right_area);
+    } else {
+        app.diff_toggle_button = None;
     }
 
     let detail_text = match app.selected_commit() {
@@ -1230,8 +1246,10 @@ fn render_bottom_row(f: &mut Frame, area: Rect, app: &App, mode: BottomMode) {
             Span::raw(" scroll  "),
             Span::styled(" PgUp/PgDn ", Style::new().reversed()),
             Span::raw(" page  "),
+            Span::styled(" c ", Style::new().reversed()),
+            Span::raw(" changes-only  "),
             Span::styled(" esc ", Style::new().reversed()),
-            Span::raw(" close diff  "),
+            Span::raw(" close  "),
             Span::styled(" q ", Style::new().reversed()),
             Span::raw(" quit "),
         ])),
@@ -1405,7 +1423,15 @@ fn lane_color(lane: usize) -> Color {
     LANE_COLORS[lane % LANE_COLORS.len()]
 }
 
-fn render_diff_panel(f: &mut Frame, area: Rect, view: &FileDiff) {
+fn render_diff_panel(f: &mut Frame, area: Rect, app: &mut App) {
+    use ratatui::layout::Alignment;
+    use ratatui::widgets::block::Title;
+
+    let Some(view) = &app.diff_view else {
+        app.diff_toggle_button = None;
+        return;
+    };
+
     let title = format!(
         " {} {} · {} ",
         match view.status {
@@ -1422,18 +1448,99 @@ fn render_diff_panel(f: &mut Frame, area: Rect, view: &FileDiff) {
         }
     );
 
+    // Right-aligned toggle in the top border. Clicking it flips only_changes.
+    let toggle_label = if view.only_changes {
+        " full file "
+    } else {
+        " changes only "
+    };
+    let toggle_text = format!("[{toggle_label}]");
+    let toggle_width = toggle_text.chars().count() as u16;
+    // The title sits in the top-border row, right-aligned with a 1-cell
+    // padding inside the right corner. Compute the button's column range so
+    // handle_mouse can dispatch clicks to it.
+    let btn_row = area.y;
+    let btn_end = area.x + area.width.saturating_sub(1); // just inside the ┐
+    let btn_start = btn_end.saturating_sub(toggle_width);
+    app.diff_toggle_button = Some((btn_row, btn_start, btn_end));
+
     // Inner content width (subtract block borders).
     let content_width = area.width.saturating_sub(2) as usize;
-    let lines: Vec<Line> = view
-        .lines
-        .iter()
-        .map(|dl| diff_line_to_line(dl, view, content_width))
-        .collect();
+    let lines = build_diff_lines(view, content_width);
+
+    let right_title = Title::from(Line::from(Span::styled(
+        toggle_text,
+        Style::new()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Right);
 
     let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title(right_title),
+        )
         .scroll((view.scroll, 0));
     f.render_widget(para, area);
+}
+
+/// Produce the Vec<Line> for the diff panel, honoring the `only_changes`
+/// toggle. When on, context (unchanged) lines are hidden and non-contiguous
+/// hunks get separated by an ellipsis row.
+fn build_diff_lines<'a>(view: &'a FileDiff, width: usize) -> Vec<Line<'a>> {
+    if !view.only_changes {
+        return view
+            .lines
+            .iter()
+            .map(|dl| diff_line_to_line(dl, view, width))
+            .collect();
+    }
+
+    let mut out: Vec<Line<'a>> = Vec::new();
+    let mut in_hunk = false;
+    let mut seen_change = false;
+    for dl in &view.lines {
+        match dl.kind {
+            LineKind::Context => {
+                // Mark end of any running hunk. The next +/- will emit a separator.
+                in_hunk = false;
+            }
+            LineKind::Addition | LineKind::Deletion => {
+                if !in_hunk && seen_change {
+                    out.push(hunk_separator(width));
+                }
+                out.push(diff_line_to_line(dl, view, width));
+                in_hunk = true;
+                seen_change = true;
+            }
+        }
+    }
+    if !seen_change {
+        out.push(Line::from(Span::styled(
+            "(no changes)".to_string(),
+            Style::new().add_modifier(Modifier::DIM),
+        )));
+    }
+    out
+}
+
+fn hunk_separator<'a>(width: usize) -> Line<'a> {
+    // "⋯" centered in the row's dim gray, matches the vertical separator of
+    // conventional unified diff viewers.
+    let marker = " ⋯ ⋯ ⋯ ";
+    let marker_w = marker.chars().count();
+    let pad = width.saturating_sub(marker_w) / 2;
+    let line = format!("{}{}", " ".repeat(pad), marker);
+    Line::from(Span::styled(
+        line,
+        Style::new()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    ))
 }
 
 fn diff_line_to_line<'a>(dl: &'a DiffLine, view: &'a FileDiff, width: usize) -> Line<'a> {

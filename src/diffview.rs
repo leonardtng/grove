@@ -41,6 +41,10 @@ pub struct FileDiff {
     /// Highlighted spans for the old-file content, indexed by (old_line - 1).
     pub hl_old: Vec<Vec<HlSpan>>,
     pub language: String,
+    /// When true, context (unchanged) lines are hidden; only additions and
+    /// deletions are shown, with an ellipsis separator between non-contiguous
+    /// hunks.
+    pub only_changes: bool,
 }
 
 struct HunkCollector {
@@ -85,6 +89,7 @@ impl FileDiff {
             hl_new: new_hl.lines,
             hl_old: old_hl.lines,
             language,
+            only_changes: false,
         })
     }
 
@@ -92,6 +97,13 @@ impl FileDiff {
         let max = self.lines.len().saturating_sub(1) as i32;
         let next = (self.scroll as i32 + delta).clamp(0, max);
         self.scroll = next as u16;
+    }
+
+    pub fn toggle_only_changes(&mut self) {
+        self.only_changes = !self.only_changes;
+        // Reset scroll so the first visible line is on screen regardless of
+        // which mode we just switched into.
+        self.scroll = 0;
     }
 
     /// Diff HEAD's version of `path` against the on-disk file in the
@@ -135,6 +147,7 @@ impl FileDiff {
             hl_new: new_hl.lines,
             hl_old: old_hl.lines,
             language,
+            only_changes: false,
         })
     }
 }
