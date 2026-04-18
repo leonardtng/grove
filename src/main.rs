@@ -537,8 +537,22 @@ impl App {
                 self.refresh();
             }
             Ok(o) => {
-                let msg = String::from_utf8_lossy(&o.stderr);
-                self.status = format!("{label} failed: {}", msg.lines().next().unwrap_or(""));
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // `git push` returns non-zero if *any* ref is rejected, even
+                // when others were pushed successfully. Detect partial
+                // success by looking for push-progress markers in stderr and
+                // surface that distinctly instead of calling it a failure.
+                let pushed_any = stderr.contains("[new tag]")
+                    || stderr.contains("[new branch]")
+                    || stderr.contains("[new reference]")
+                    || (stderr.contains(" -> ") && !stderr.contains("! [rejected]"));
+                let summary = summarize_git_stderr(&stderr);
+                if pushed_any {
+                    self.status = format!("{label}: partial ({summary})");
+                    self.refresh();
+                } else {
+                    self.status = format!("{label} failed: {summary}");
+                }
             }
             Err(e) => {
                 self.status = format!("{label} error: {e}");
@@ -1421,6 +1435,33 @@ fn cell_to_char(cell: Cell) -> (char, Color) {
 
 fn lane_color(lane: usize) -> Color {
     LANE_COLORS[lane % LANE_COLORS.len()]
+}
+
+/// Pick the most informative line out of `git`'s stderr for status display.
+/// Prefers lines that git itself marks as errors; falls back to the last
+/// non-empty line (usually a summary) or the first non-empty line.
+fn summarize_git_stderr(stderr: &str) -> String {
+    let meaningful: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if meaningful.is_empty() {
+        return "exited non-zero (no stderr)".to_string();
+    }
+    // Prefer explicit error markers.
+    for l in &meaningful {
+        let lower = l.to_ascii_lowercase();
+        if lower.starts_with("error:")
+            || lower.starts_with("fatal:")
+            || l.contains("[rejected]")
+            || l.contains("! [remote rejected]")
+        {
+            return (*l).to_string();
+        }
+    }
+    // Otherwise the last line is usually the summary (e.g. "To <url>").
+    (*meaningful.last().unwrap()).to_string()
 }
 
 fn render_diff_panel(f: &mut Frame, area: Rect, app: &mut App) {
