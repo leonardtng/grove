@@ -68,38 +68,29 @@ pub fn load_repo(repo_path: &Path, limit: usize) -> Result<LoadedRepo> {
 
     let commits = load_commits(&repo, &tips, limit)?;
 
-    let work_dir = repo
-        .work_dir()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| repo_path.to_path_buf());
-    let (upstream_ref, merged_branches) = compute_merged_branches(&work_dir, &refs_by_id);
-
+    // NB: merged-branch detection is deliberately NOT done here. It runs
+    // `git cherry` per branch and is slow on big repos. App spawns a thread
+    // that calls `compute_merged_branches` and fills these fields in async.
     Ok(LoadedRepo {
         repo,
         commits,
         refs_by_id,
         head_id,
-        upstream_ref,
-        merged_branches,
+        upstream_ref: None,
+        merged_branches: HashSet::new(),
     })
 }
 
 /// Detect the canonical upstream branch and which other branches have been
 /// merged into it (either by ancestor reachability or by patch equivalence —
 /// i.e. squash/rebase merges).
-fn compute_merged_branches(
+///
+/// Pure: takes the data it needs by value so callers can run it on a thread
+/// without sharing `gix::Repository`.
+pub fn compute_merged_branches(
     work_dir: &Path,
-    refs_by_id: &HashMap<ObjectId, Vec<RefLabel>>,
+    all_branches: &HashSet<String>,
 ) -> (Option<String>, HashSet<String>) {
-    // Collect all branch names that actually exist (local + remote).
-    let mut all_branches: HashSet<String> = HashSet::new();
-    for labels in refs_by_id.values() {
-        for l in labels {
-            if matches!(l.kind, RefKind::LocalBranch | RefKind::RemoteBranch) {
-                all_branches.insert(l.name.clone());
-            }
-        }
-    }
 
     let candidates = ["main", "master", "origin/main", "origin/master"];
     let upstream: Option<String> = candidates
@@ -157,7 +148,7 @@ fn compute_merged_branches(
     // per commit in branch-not-upstream: `- <sha>` if patch-equivalent in
     // upstream, `+ <sha>` if not. Branch is fully patch-merged iff every
     // line begins with `-` (or output is empty).
-    for branch in &all_branches {
+    for branch in all_branches.iter() {
         if siblings.contains(branch) || merged.contains(branch) {
             continue;
         }

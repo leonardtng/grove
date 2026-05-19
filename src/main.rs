@@ -15,7 +15,13 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
-use std::{collections::HashMap, io, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    path::PathBuf,
+    sync::mpsc,
+    time::Duration,
+};
 
 mod diff;
 mod diffview;
@@ -62,6 +68,10 @@ struct App {
     /// Position of the "changes only / full file" toggle in the diff panel
     /// title, captured each frame for click dispatch. (row, x_start, x_end).
     diff_toggle_button: Option<(u16, u16, u16)>,
+    /// Receiver for the background `compute_merged_branches` worker. When
+    /// the thread finishes it sends (upstream_ref, merged_set); the main
+    /// loop polls each tick and applies the result.
+    merged_rx: Option<mpsc::Receiver<(Option<String>, HashSet<String>)>>,
     should_quit: bool,
 }
 
@@ -147,15 +157,7 @@ impl App {
         let graph_rows = graph::build(&loaded.commits);
         let expanded = vec![false; loaded.commits.len()];
         let selected = if loaded.commits.is_empty() { None } else { Some(0) };
-        let status = match &loaded.upstream_ref {
-            Some(up) if !loaded.merged_branches.is_empty() => format!(
-                "loaded {} commits · {} branch(es) merged into {}",
-                loaded.commits.len(),
-                loaded.merged_branches.len(),
-                up
-            ),
-            _ => format!("loaded {} commits", loaded.commits.len()),
-        };
+        let status = format!("loaded {} commits", loaded.commits.len());
         let mut app = Self {
             repo_path,
             limit,
@@ -176,10 +178,63 @@ impl App {
             uncommitted_expanded: false,
             uncommitted_files: None,
             diff_toggle_button: None,
+            merged_rx: None,
             should_quit: false,
         };
         app.detect_dirty();
+        app.spawn_merged_detection();
         Ok(app)
+    }
+
+    /// Kick off `git cherry`-based merged-branch detection on a worker
+    /// thread. Pure-data inputs (work_dir + branch names) so we don't have to
+    /// share `gix::Repository` across threads.
+    fn spawn_merged_detection(&mut self) {
+        let work_dir = self
+            .loaded
+            .repo
+            .work_dir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.repo_path.clone());
+
+        let mut all_branches: HashSet<String> = HashSet::new();
+        for labels in self.loaded.refs_by_id.values() {
+            for l in labels {
+                if matches!(l.kind, RefKind::LocalBranch | RefKind::RemoteBranch) {
+                    all_branches.insert(l.name.clone());
+                }
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = git::compute_merged_branches(&work_dir, &all_branches);
+            let _ = tx.send(result); // discard if receiver was dropped
+        });
+        self.merged_rx = Some(rx);
+    }
+
+    /// Non-blocking: if the worker thread has finished, apply its result.
+    fn poll_merged_detection(&mut self) {
+        let Some(rx) = &self.merged_rx else { return };
+        match rx.try_recv() {
+            Ok((upstream, set)) => {
+                self.loaded.upstream_ref = upstream.clone();
+                self.loaded.merged_branches = set;
+                self.merged_rx = None;
+                if let Some(up) = upstream {
+                    let n = self.loaded.merged_branches.len();
+                    if n > 0 {
+                        self.status =
+                            format!("{n} branch(es) merged into {up}");
+                    }
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.merged_rx = None;
+            }
+        }
     }
 
     fn detect_dirty(&mut self) {
@@ -603,18 +658,11 @@ impl App {
                         self.selected = if loaded.commits.is_empty() { None } else { Some(0) };
                     }
                 }
-                self.status = match &loaded.upstream_ref {
-                    Some(up) if !loaded.merged_branches.is_empty() => format!(
-                        "refreshed: {} commits · {} merged into {}",
-                        loaded.commits.len(),
-                        loaded.merged_branches.len(),
-                        up
-                    ),
-                    _ => format!("refreshed: {} commits", loaded.commits.len()),
-                };
+                self.status = format!("refreshed: {} commits", loaded.commits.len());
                 self.loaded = loaded;
                 self.clamp_scroll();
                 self.detect_dirty();
+                self.spawn_merged_detection();
             }
             Err(e) => {
                 self.status = format!("refresh failed: {e}");
@@ -924,6 +972,14 @@ fn run_app<B: ratatui::backend::Backend>(
             last_right_area = r;
         })?;
 
+        // Pull any merged-branch detection result that's ready. Triggers a
+        // redraw on the next loop iteration if it landed something new.
+        let had_merged_rx = app.merged_rx.is_some();
+        app.poll_merged_detection();
+        if had_merged_rx && app.merged_rx.is_none() {
+            continue;
+        }
+
         // Run any pending action AFTER the draw so the "refreshing..." /
         // "fetching..." status is visible while the (blocking) git command runs.
         if let Some(action) = app.pending.take() {
@@ -945,6 +1001,17 @@ fn run_app<B: ratatui::backend::Backend>(
                 PendingAction::Reset { mode, sha } => app.reset_to_commit(mode, &sha),
             }
             continue; // re-render with the result status before reading input
+        }
+
+        // Poll with a short timeout so a still-running merged-branch worker
+        // can deliver its result without the user having to press a key.
+        let poll_timeout = if app.merged_rx.is_some() {
+            Duration::from_millis(150)
+        } else {
+            Duration::from_millis(500)
+        };
+        if !event::poll(poll_timeout)? {
+            continue;
         }
 
         match event::read()? {
