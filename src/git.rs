@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use gix::ObjectId;
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 pub struct CommitRow {
     pub id: ObjectId,
@@ -31,6 +34,14 @@ pub struct LoadedRepo {
     pub commits: Vec<CommitRow>,
     pub refs_by_id: HashMap<ObjectId, Vec<RefLabel>>,
     pub head_id: Option<ObjectId>,
+    /// Canonical "main" branch chosen by upstream-name priority (main →
+    /// master → origin/main → origin/master). `None` if none exist.
+    pub upstream_ref: Option<String>,
+    /// Set of branch ref names (as displayed, e.g. "feature/foo",
+    /// "origin/feature/foo") whose commits are either ancestor-reachable
+    /// from `upstream_ref` (direct/ff merge) or patch-equivalent to commits
+    /// in it (squash/rebase merge).
+    pub merged_branches: HashSet<String>,
 }
 
 pub fn load_repo(repo_path: &Path, limit: usize) -> Result<LoadedRepo> {
@@ -57,13 +68,125 @@ pub fn load_repo(repo_path: &Path, limit: usize) -> Result<LoadedRepo> {
 
     let commits = load_commits(&repo, &tips, limit)?;
 
+    let work_dir = repo
+        .work_dir()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let (upstream_ref, merged_branches) = compute_merged_branches(&work_dir, &refs_by_id);
+
     Ok(LoadedRepo {
         repo,
         commits,
         refs_by_id,
         head_id,
+        upstream_ref,
+        merged_branches,
     })
 }
+
+/// Detect the canonical upstream branch and which other branches have been
+/// merged into it (either by ancestor reachability or by patch equivalence —
+/// i.e. squash/rebase merges).
+fn compute_merged_branches(
+    work_dir: &Path,
+    refs_by_id: &HashMap<ObjectId, Vec<RefLabel>>,
+) -> (Option<String>, HashSet<String>) {
+    // Collect all branch names that actually exist (local + remote).
+    let mut all_branches: HashSet<String> = HashSet::new();
+    for labels in refs_by_id.values() {
+        for l in labels {
+            if matches!(l.kind, RefKind::LocalBranch | RefKind::RemoteBranch) {
+                all_branches.insert(l.name.clone());
+            }
+        }
+    }
+
+    let candidates = ["main", "master", "origin/main", "origin/master"];
+    let upstream: Option<String> = candidates
+        .iter()
+        .find(|c| all_branches.contains(**c))
+        .map(|c| c.to_string());
+
+    let Some(up) = upstream.clone() else {
+        return (None, HashSet::new());
+    };
+
+    // Don't dim the upstream itself or its local/remote sibling.
+    let siblings: HashSet<String> = {
+        let mut s = HashSet::new();
+        s.insert(up.clone());
+        if let Some(rest) = up.strip_prefix("origin/") {
+            s.insert(rest.to_string());
+        } else {
+            s.insert(format!("origin/{up}"));
+        }
+        s
+    };
+
+    // Tier 1: branches whose tips are ancestors of upstream (direct/ff merges).
+    // One git call instead of N. The `--merged` flag also returns the upstream
+    // itself, so we filter siblings out below.
+    let mut merged: HashSet<String> = HashSet::new();
+    if let Ok(o) = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--merged",
+            &up,
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .current_dir(work_dir)
+        .output()
+    {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let name = line.trim();
+                if name.is_empty() || siblings.contains(name) {
+                    continue;
+                }
+                if all_branches.contains(name) {
+                    merged.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    // Tier 2: for branches NOT directly merged, check patch-equivalence
+    // (squash / rebase). `git cherry <upstream> <branch>` returns one line
+    // per commit in branch-not-upstream: `- <sha>` if patch-equivalent in
+    // upstream, `+ <sha>` if not. Branch is fully patch-merged iff every
+    // line begins with `-` (or output is empty).
+    for branch in &all_branches {
+        if siblings.contains(branch) || merged.contains(branch) {
+            continue;
+        }
+        if is_patch_merged(work_dir, &up, branch) {
+            merged.insert(branch.clone());
+        }
+    }
+
+    (upstream, merged)
+}
+
+fn is_patch_merged(work_dir: &Path, upstream: &str, branch: &str) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["cherry", upstream, branch])
+        .current_dir(work_dir)
+        .output();
+    let Ok(o) = out else { return false };
+    if !o.status.success() {
+        return false;
+    }
+    let s = String::from_utf8_lossy(&o.stdout);
+    if s.trim().is_empty() {
+        return true;
+    }
+    s.lines()
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| l.starts_with("- "))
+}
+
 
 fn is_commit(repo: &gix::Repository, id: ObjectId) -> bool {
     matches!(

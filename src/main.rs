@@ -147,7 +147,15 @@ impl App {
         let graph_rows = graph::build(&loaded.commits);
         let expanded = vec![false; loaded.commits.len()];
         let selected = if loaded.commits.is_empty() { None } else { Some(0) };
-        let status = format!("loaded {} commits", loaded.commits.len());
+        let status = match &loaded.upstream_ref {
+            Some(up) if !loaded.merged_branches.is_empty() => format!(
+                "loaded {} commits · {} branch(es) merged into {}",
+                loaded.commits.len(),
+                loaded.merged_branches.len(),
+                up
+            ),
+            _ => format!("loaded {} commits", loaded.commits.len()),
+        };
         let mut app = Self {
             repo_path,
             limit,
@@ -595,7 +603,15 @@ impl App {
                         self.selected = if loaded.commits.is_empty() { None } else { Some(0) };
                     }
                 }
-                self.status = format!("refreshed: {} commits", loaded.commits.len());
+                self.status = match &loaded.upstream_ref {
+                    Some(up) if !loaded.merged_branches.is_empty() => format!(
+                        "refreshed: {} commits · {} merged into {}",
+                        loaded.commits.len(),
+                        loaded.merged_branches.len(),
+                        up
+                    ),
+                    _ => format!("refreshed: {} commits", loaded.commits.len()),
+                };
                 self.loaded = loaded;
                 self.clamp_scroll();
                 self.detect_dirty();
@@ -1170,7 +1186,7 @@ fn draw(f: &mut Frame, app: &mut App) -> (u16, Rect, Rect) {
     for (idx, c) in app.loaded.commits.iter().enumerate() {
         let row = &app.graph_rows[idx];
         let refs = app.loaded.refs_by_id.get(&c.id);
-        let mut line = commit_line(row, c, refs);
+        let mut line = commit_line(row, c, refs, &app.loaded.merged_branches);
         if app.selected == Some(idx) {
             apply_bg(&mut line, highlight_bg);
         }
@@ -1225,6 +1241,31 @@ fn draw(f: &mut Frame, app: &mut App) -> (u16, Rect, Rect) {
                     .join(" ");
                 lines.push(Line::from(format!("Parents: {parents_str}")));
             }
+
+            // Surface the merged-branch annotation: if any branch chip on
+            // this commit has been merged into the upstream (direct or
+            // squash/rebase), say so plainly.
+            if let Some(upstream) = &app.loaded.upstream_ref {
+                if let Some(labels) = app.loaded.refs_by_id.get(&c.id) {
+                    let merged_names: Vec<&str> = labels
+                        .iter()
+                        .filter(|l| {
+                            matches!(l.kind, RefKind::LocalBranch | RefKind::RemoteBranch)
+                                && app.loaded.merged_branches.contains(&l.name)
+                        })
+                        .map(|l| l.name.as_str())
+                        .collect();
+                    if !merged_names.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!("Merged into {upstream} (patch-equivalent)"),
+                            Style::new()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+                }
+            }
+
             lines.push(Line::from(""));
             lines.push(Line::from(c.summary.clone()));
             if !c.body.is_empty() {
@@ -1409,6 +1450,7 @@ fn commit_line<'a>(
     row: &GraphRow,
     c: &'a CommitRow,
     refs: Option<&'a Vec<RefLabel>>,
+    merged: &std::collections::HashSet<String>,
 ) -> Line<'a> {
     let mut spans: Vec<Span<'a>> = Vec::new();
     spans.extend(render_graph_spans(row, &graph::render_row(row)));
@@ -1420,12 +1462,23 @@ fn commit_line<'a>(
 
     if let Some(refs) = refs {
         for r in refs {
-            let style = match r.kind {
+            let is_merged =
+                matches!(r.kind, RefKind::LocalBranch | RefKind::RemoteBranch)
+                    && merged.contains(&r.name);
+            let mut style = match r.kind {
                 RefKind::Head => Style::new().fg(Color::White).bg(Color::Blue).bold(),
                 RefKind::LocalBranch => Style::new().fg(Color::Black).bg(Color::Green),
                 RefKind::RemoteBranch => Style::new().fg(Color::Black).bg(Color::Red),
                 RefKind::Tag => Style::new().fg(Color::Black).bg(Color::Yellow),
             };
+            if is_merged {
+                // Dim + strikethrough to signal "already merged into upstream".
+                // Keep the colored chip background so the branch is still
+                // identifiable, but darken the fg so the eye skips past it.
+                style = style
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::CROSSED_OUT | Modifier::DIM);
+            }
             spans.push(Span::styled(format!(" {} ", r.name), style));
             spans.push(Span::raw(" "));
         }
