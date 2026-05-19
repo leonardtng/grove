@@ -86,6 +86,31 @@ enum PendingAction {
     CheckoutCommit { sha: String },
     DeleteBranch { name: String },
     RenameBranch { old: String, new: String },
+    Reset { mode: ResetMode, sha: String },
+}
+
+#[derive(Clone, Copy)]
+enum ResetMode {
+    Soft,
+    Mixed,
+    Hard,
+}
+
+impl ResetMode {
+    fn flag(self) -> &'static str {
+        match self {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            ResetMode::Soft => "soft",
+            ResetMode::Mixed => "mixed",
+            ResetMode::Hard => "hard",
+        }
+    }
 }
 
 struct InputState {
@@ -108,10 +133,12 @@ struct Picker {
     kind: PickerKind,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PickerKind {
     Checkout,
     Delete,
+    /// Three rows: soft / mixed / hard. Commit SHA captured at picker open.
+    ResetMode { sha: String },
 }
 
 impl App {
@@ -435,15 +462,25 @@ impl App {
 
     fn picker_submit(&mut self) {
         let Some(p) = self.picker.take() else { return };
-        let Some(name) = p.items.get(p.selected).cloned() else { return };
         match p.kind {
             PickerKind::Checkout => {
+                let Some(name) = p.items.get(p.selected).cloned() else { return };
                 self.status = format!("checking out branch '{name}'...");
                 self.pending = Some(PendingAction::CheckoutBranch { name });
             }
             PickerKind::Delete => {
+                let Some(name) = p.items.get(p.selected).cloned() else { return };
                 self.status = format!("deleting branch '{name}'...");
                 self.pending = Some(PendingAction::DeleteBranch { name });
+            }
+            PickerKind::ResetMode { sha } => {
+                let mode = match p.selected {
+                    0 => ResetMode::Soft,
+                    2 => ResetMode::Hard,
+                    _ => ResetMode::Mixed,
+                };
+                self.status = format!("resetting ({}) to {}...", mode.label(), &sha[..7]);
+                self.pending = Some(PendingAction::Reset { mode, sha });
             }
         }
     }
@@ -496,6 +533,55 @@ impl App {
 
     fn rename_branch(&mut self, old: &str, new: &str) {
         self.run_git(&["branch", "-m", old, new], &format!("rename → '{new}'"));
+    }
+
+    fn reset_to_commit(&mut self, mode: ResetMode, sha: &str) {
+        self.run_git(
+            &["reset", mode.flag(), sha],
+            &format!("reset {} → {}", mode.label(), &sha[..7]),
+        );
+    }
+
+    fn start_reset_picker(&mut self) {
+        let Some(idx) = self.selected else {
+            self.status = "no commit selected".to_string();
+            return;
+        };
+        let Some(commit) = self.loaded.commits.get(idx) else { return };
+        let sha = commit.id_hex.clone();
+
+        // Try to read current branch name for the picker title (purely cosmetic).
+        let work_dir = self
+            .loaded
+            .repo
+            .work_dir()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.repo_path.clone());
+        let branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&work_dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        let title = if branch.is_empty() || branch == "HEAD" {
+            format!("reset HEAD → {} — pick mode", &sha[..7])
+        } else {
+            format!("reset {branch} → {} — pick mode", &sha[..7])
+        };
+
+        self.picker = Some(Picker {
+            title,
+            items: vec![
+                "soft   — keep all changes, reset HEAD".to_string(),
+                "mixed  — keep working tree, reset index (default)".to_string(),
+                "hard   — DISCARD all changes".to_string(),
+            ],
+            selected: 1, // default to mixed, matching git's default
+            kind: PickerKind::ResetMode { sha },
+        });
     }
 
     fn refresh(&mut self) {
@@ -840,6 +926,7 @@ fn run_app<B: ratatui::backend::Backend>(
                 PendingAction::CheckoutCommit { sha } => app.checkout_commit(&sha),
                 PendingAction::DeleteBranch { name } => app.delete_branch(&name),
                 PendingAction::RenameBranch { old, new } => app.rename_branch(&old, &new),
+                PendingAction::Reset { mode, sha } => app.reset_to_commit(mode, &sha),
             }
             continue; // re-render with the result status before reading input
         }
@@ -934,6 +1021,7 @@ fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('c') => app.checkout_selected(),
                         KeyCode::Char('D') => app.delete_branch_at_selected(),
                         KeyCode::Char('n') => app.start_rename_input(),
+                        KeyCode::Char('R') => app.start_reset_picker(),
                         _ => {}
                     }
                 }
@@ -1252,6 +1340,8 @@ fn render_bottom_row(f: &mut Frame, area: Rect, app: &App, mode: BottomMode) {
             Span::raw(" del  "),
             Span::styled(" t ", Style::new().reversed()),
             Span::raw(" tag  "),
+            Span::styled(" R ", Style::new().reversed()),
+            Span::raw(" reset  "),
             Span::styled(" q ", Style::new().reversed()),
             Span::raw(" quit "),
         ])),
